@@ -239,7 +239,7 @@ class action():
                 return False
 
         # Open temp sheet
-        sheet2Edit = sheetObj.open(key, sheetDir)
+        sheet2Edit = sheetObj.open(key, sheetDir, template=True)
         if sheet2Edit == None:
             return False
 
@@ -433,47 +433,52 @@ class jiraUpdate():
             dict2Up[i] = dateCSV.fromJira(dict2Up[i])
 
 class sheetObj:
-
-    _file = None
+    _fileTemp = None
+    _fileRead = None
     _key = None
     _realName = None
 
     def __init__(self, fd, key, realName):
-        self._file = fd
+        self._fileRead = fd
         self._realName = realName
         self._key = key
 
-    def open(keyId, path):
+    def open(keyId, path, template=False):
         sheet = None
+        realName = path + '/' + keyId + '.md'
         try:
-            fileSheet = tempfile.NamedTemporaryFile(mode='x',
-                    prefix=keyId+'out', suffix=".md")
-            sheet = sheetObj(fileSheet, keyId,  path + '/' + keyId + '.md')
+            sheetFile = open(realName, 'r')
+            debug("Existing sheet found for %s" % keyId)
         except Exception as inst:
-            debug("Unable to open a temp sheet for %s: %s" % (keyId, inst))
+            debug("No existing file found for %s" % keyId)
+            if template:
+                debug("Use template instead")
+                sheetFile = sheetObj.openTemplate()
+            else:
+                debug("Error: %s" % inst)
+                return sheet
+
+        if sheetFile != None:
+            sheet = sheetObj(sheetFile, keyId, realName)
 
         return sheet
 
     def name(self, temp=False):
         if temp:
-            return self._file.name
+            return self._fileTemp.name
         return self._realName
 
     def init(self, fields):
-        # Open existing sheet
         try:
-            sheetFile = open(self._realName, 'r')
-            debug("Existing sheet found for %s" % self._key)
+            self._fileTemp = tempfile.NamedTemporaryFile(mode='x',
+                    prefix=self._key+'out', suffix=".md")
         except Exception as inst:
-            debug("No existing file found for %s -> create one with template"
-                    % self._key)
-            sheetFile = self._openTemplate()
+            debug("Unable to open a temp sheet for %s: %s" % (self._key, inst))
 
-        self.update(fields, sheetFile)
-        sheetFile.close()
+        self.update(fields)
 
-    def update(self, fields, fileIn):
-        sheetData = self.parse(fileIn)
+    def update(self, fields):
+        sheetData = self.parse()
 
         if sheetData == None:
             return False
@@ -487,12 +492,15 @@ class sheetObj:
 
         return self._writeData2Sheet(sheetData)
 
-    def parse(self, fileIn):
+    def parse(self):
         dataSheet = OrderedDict()
         line = ""
         nextLine = ""
         commentIdx = 0
         key = ""
+
+        fileIn = self._fileRead
+        fileIn.seek(0)
 
         for line in fileIn:
             key, summary = self._parseHeader(line)
@@ -521,7 +529,7 @@ class sheetObj:
             else:
                 field = self._parseField(line)
                 if field:
-                    value, line, nextLine = self._getValue(line, nextLine, fileIn)
+                    value, line, nextLine = self._getValue(line, nextLine)
                     dataSheet[field.casefold()] = value
 
             line = nextLine
@@ -538,22 +546,26 @@ class sheetObj:
         return dataSheet
 
     def close(self):
-        self._file.close()
+        self._fileRead.close()
+        if self._fileTemp != None:
+            self._fileTemp.close()
 
     def save(self):
         debug("Saving %s" % self._realName)
         try:
-            shutil.copyfile(self._file.name, self._realName)
+            shutil.copyfile(self._fileTemp.name, self._realName)
         except Exception as inst:
             debug("Failed to replace/create %s: %s" % (self._realName, inst))
 
-    def _openTemplate(self):
+    def openTemplate():
         templatePath = os.path.dirname(__file__) + "/sheet.template"
+        sheetFile = None
         try:
-            return open(templatePath, 'r')
+            sheetFile = open(templatePath, 'r')
         except Exception as inst:
             debug("Unable to open template %s: %s" % (templatePath, inst))
-            return None
+
+        return sheetFile
 
     def _parseHeader(self, line):
         p = re.compile('^# ([A-Z]+-[0-9]+)[ ]*:[ ]*([^ ].*[^ ])[ ]* #$')
@@ -587,11 +599,11 @@ class sheetObj:
 
         return comment
 
-    def _getValue(self, line, nextLine, fileIter):
+    def _getValue(self, line, nextLine):
         val = ""
         if not nextLine.startswith('#'):
             line = nextLine
-            for nextLine in fileIter:
+            for nextLine in self._fileRead:
                 if nextLine.startswith('#'):
                     if line != '\n':
                         val += line
@@ -610,22 +622,22 @@ class sheetObj:
     def _writeData2Sheet(self, data):
         try:
             # Write header
-            self._file.write("# %s : %s #\n\n"
+            self._fileTemp.write("# %s : %s #\n\n"
                     % (data.pop('key'), data.pop('summary')))
 
             # Write field and comments
             for key, value in data.items():
                 if key.startswith('sheetComment'):
-                    self._file.write("#%s" % value)
+                    self._fileTemp.write("#%s" % value)
                 else:
-                    self._file.write("## %s ##\n" % key.capitalize())
-                    self._file.write(value+'\n')
+                    self._fileTemp.write("## %s ##\n" % key.capitalize())
+                    self._fileTemp.write(value+'\n')
 
-            self._file.flush()
+            self._fileTemp.flush()
 
         except Exception as inst:
             debug("Unable to write at sheet %s (%s): %s"
-                    % (self._key, self._file.name, inst))
+                    % (self._key, self._fileTemp.name, inst))
 
 
 if __name__ == "__main__":
