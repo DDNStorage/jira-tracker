@@ -11,6 +11,7 @@ import urllib.parse
 from datetime import datetime
 from datetime import timezone
 from datetime import timedelta
+from collections import OrderedDict
 from jira import JIRA
 
 # Config
@@ -69,6 +70,13 @@ def parseArgs():
             help="Generate output for a mail")
     mailParse.add_argument("outFile", type=argparse.FileType('w'),
             help="Output file")
+    # Edit sheet
+    editParser = subParsers.add_parser('edit',
+            help="Edit jira ticket sheet")
+    editParser.add_argument("key",
+            help="Ticket key of the sheet")
+    editParser.add_argument( "-d", "--sheetDir",
+            help="Directory where is store ticket sheets")
 
     return parser.parse_args()
 
@@ -109,9 +117,8 @@ class action():
     _jira = None
     _files = { 'in' : None, 'out' : None }
 
-    def __init__(self, conf, jira):
+    def __init__(self, conf):
         self._conf = conf
-        self._jira = jira
 
     def names(self):
         return list(self.funcs.keys())
@@ -127,6 +134,9 @@ class action():
         return ret
 
     def update(self, args):
+        if not self._initJiraApi():
+            return False
+
         csvIn = self._initCsvReader(args.inFile)
         if csvIn == None:
             return False
@@ -151,8 +161,7 @@ class action():
         # Update existing row
         for rowIn in csvIn:
             rowNbr+=1
-            p = re.compile('^[ \t]*[A-Z]+-[0-9]+[ \t]*$')
-            if 'key' not in rowIn or not p.match(rowIn['key']):
+            if 'key' not in rowIn or not self._checkKeyFormat(rowIn['key']):
                 debug("Invalid 'key' at %s:%d" % (args.inFile.name, rowNbr))
                 continue
             
@@ -173,7 +182,7 @@ class action():
 
         # Adding new row
         if not args.no_news:
-            debug("Creation date of th last entry in the database: %s" % lastCreated)
+            debug("Creation date of the last entry in the database: %s" % lastCreated)
             for jiraData in self._jira.news(lastCreated):
                 rowNbr+=1
                 rowOut = self._initFields(jiraData, outFields)
@@ -205,12 +214,74 @@ class action():
         debug("Number of new rows: %d/%d," % (len(newKeys), rowNbr-1))
         debug(" " + self._jira.link(newKeys))
 
+    def edit(self, args):
+        csvIn = self._initCsvReader(args.inFile)
+        if csvIn == None:
+            return False
+
+        key = args.key
+        if not self._checkKeyFormat(key):
+            debug("Invalid key id: %s" % key)
+            return False
+
+        sheetDir = args.sheetDir
+        if not sheetDir:
+            sheetDir = os.path.dirname(args.inFile.name)
+            if not sheetDir:
+                sheetDir = '.'
+            sheetDir += '/sheets'
+
+        if not os.path.isdir(sheetDir):
+            try:
+                os.mkdir(sheetDir)
+            except Exception as inst:
+                debug("Failed to create %s: %s" % (sheetDir, inst))
+                return False
+
+        # Open temp sheet
+        sheet2Edit = sheetObj.open(key, sheetDir)
+        if sheet2Edit == None:
+            return False
+
+        for rowIn in csvIn:
+            if rowIn['key'] == key:
+                break
+
+        if rowIn['key'] != key:
+            debug("Ticket key \"%s\" not found in %s" % (key, args.inFile.name))
+            return False
+
+        outFields = conf.mergeFields(csvIn.fieldnames)
+        rowOut = self._initFields(rowIn, outFields)
+
+        sheet2Edit.init(rowOut)
+
+        # Open with editor
+        editor = 'vim'
+        if 'EDITOR' in os.environ:
+            editor = os.environ['EDITOR']
+
+        ret = os.system(editor + " '" + sheet2Edit.name(temp=True) + "'")
+
+        if ret == 0:
+            sheet2Edit.save()
+
+        sheet2Edit.close()
 
     def search(self, args):
         print("search")
 
     def mail(self, args):
         print("mail")
+
+    def _initJiraApi(self):
+        if self._jira == None:
+            try:
+                self._jira = jiraUpdate(conf)
+            except Exception as inst:
+                debug( "Fail to init JIRA API: %s" % inst)
+                return False
+        return True
 
     def _initFields(self, rowIn, outFields):
         rowOut = dict.fromkeys(outFields)
@@ -226,6 +297,10 @@ class action():
         
         return rowOut
     
+    def _checkKeyFormat(self, key):
+        p = re.compile('^[ \t]*[A-Z]+-[0-9]+[ \t]*$')
+        return p.match(key)
+
     def _convertCvsDate(self, row):
         # Convert dates
         for i in self._conf.dateFields:
@@ -263,6 +338,7 @@ class action():
             "update" : update,
             "search" : search,
             "mail"   : mail,
+            "edit"   : edit,
             }
 
 class jiraUpdate():
@@ -356,15 +432,205 @@ class jiraUpdate():
         for i in self._conf.dateFields:
             dict2Up[i] = dateCSV.fromJira(dict2Up[i])
 
+class sheetObj:
+
+    _file = None
+    _key = None
+    _realName = None
+
+    def __init__(self, fd, key, realName):
+        self._file = fd
+        self._realName = realName
+        self._key = key
+
+    def open(keyId, path):
+        sheet = None
+        try:
+            fileSheet = tempfile.NamedTemporaryFile(mode='x',
+                    prefix=keyId+'out', suffix=".md")
+            sheet = sheetObj(fileSheet, keyId,  path + '/' + keyId + '.md')
+        except Exception as inst:
+            debug("Unable to open a temp sheet for %s: %s" % (keyId, inst))
+
+        return sheet
+
+    def name(self, temp=False):
+        if temp:
+            return self._file.name
+        return self._realName
+
+    def init(self, fields):
+        # Open existing sheet
+        try:
+            sheetFile = open(self._realName, 'r')
+            debug("Existing sheet found for %s" % self._key)
+        except Exception as inst:
+            debug("No existing file found for %s -> create one with template"
+                    % self._key)
+            sheetFile = self._openTemplate()
+
+        self.update(fields, sheetFile)
+        sheetFile.close()
+
+    def update(self, fields, fileIn):
+        sheetData = self.parse(fileIn)
+
+        if sheetData == None:
+            return False
+
+        for i in sheetData:
+            if i in fields:
+                if not i in ['key','summary']:
+                    sheetData[i] = self._formatVal(fields[i])
+                else:
+                    sheetData[i] = fields[i].strip()
+
+        return self._writeData2Sheet(sheetData)
+
+    def parse(self, fileIn):
+        dataSheet = OrderedDict()
+        line = ""
+        nextLine = ""
+        commentIdx = 0
+        key = ""
+
+        for line in fileIn:
+            key, summary = self._parseHeader(line)
+            if key:
+                if key != self._key:
+                    debug("Sheet key in header not matching")
+                dataSheet['key'] = key
+                dataSheet['summary'] = summary
+                break
+
+        if not key:
+            debug("No header found in sheet")
+            return None
+
+        try:
+            line = next(fileIn)
+        except StopIteration:
+            debug("No fields in the sheet")
+            return None
+
+        for nextLine in fileIn:
+            comment = self._parseComment(line)
+            if comment:
+                dataSheet['sheetComment%d' % commentIdx] = comment
+                commentIdx += 1
+            else:
+                field = self._parseField(line)
+                if field:
+                    value, line, nextLine = self._getValue(line, nextLine, fileIn)
+                    dataSheet[field.casefold()] = value
+
+            line = nextLine
+
+        # Parse last line
+        comment = self._parseComment(nextLine)
+        if comment:
+            dataSheet['sheetComment%d' % commentIdx] = comment
+        else:
+            field = self._parseField(nextLine)
+            if field:
+                dataSheet[field] = ""
+
+        return dataSheet
+
+    def close(self):
+        self._file.close()
+
+    def save(self):
+        debug("Saving %s" % self._realName)
+        try:
+            shutil.copyfile(self._file.name, self._realName)
+        except Exception as inst:
+            debug("Failed to replace/create %s: %s" % (self._realName, inst))
+
+    def _openTemplate(self):
+        templatePath = os.path.dirname(__file__) + "/sheet.template"
+        try:
+            return open(templatePath, 'r')
+        except Exception as inst:
+            debug("Unable to open template %s: %s" % (templatePath, inst))
+            return None
+
+    def _parseHeader(self, line):
+        p = re.compile('^# ([A-Z]+-[0-9]+)[ ]*:[ ]*([^ ].*[^ ])[ ]* #$')
+        key = ""
+        summary = ""
+
+        search = p.search(line)
+        if search:
+            key = search.group(1)
+            summary = search.group(2)
+
+        return key, summary
+
+    def _parseField(self, line):
+        pField = re.compile('^## [ ]*([^ ]+)[ ]* ##$')
+        fieldName = ""
+
+        search = pField.search(line)
+        if search:
+            fieldName = search.group(1)
+
+        return fieldName
+
+    def _parseComment(self, line):
+        pComment = re.compile('^#([^#]*)')
+        comment = ""
+
+        search = pComment.search(line)
+        if search:
+            comment = search.group(1).strip(' ')
+
+        return comment
+
+    def _getValue(self, line, nextLine, fileIter):
+        val = ""
+        if not nextLine.startswith('#'):
+            line = nextLine
+            for nextLine in fileIter:
+                if nextLine.startswith('#'):
+                    if line != '\n':
+                        val += line
+                    break
+                val += line
+                line = nextLine
+
+        return val, line, nextLine
+
+    def _formatVal(self, val):
+        val.replace('\r\n', ' ');
+        val.replace('\n', ' ');
+
+        return re.sub("(.{80})", "\\1\n", val, 0, re.DOTALL) + '\n'
+
+    def _writeData2Sheet(self, data):
+        try:
+            # Write header
+            self._file.write("# %s : %s #\n\n"
+                    % (data.pop('key'), data.pop('summary')))
+
+            # Write field and comments
+            for key, value in data.items():
+                if key.startswith('sheetComment'):
+                    self._file.write("#%s" % value)
+                else:
+                    self._file.write("## %s ##\n" % key.capitalize())
+                    self._file.write(value+'\n')
+
+            self._file.flush()
+
+        except Exception as inst:
+            debug("Unable to write at sheet %s (%s): %s"
+                    % (self._key, self._file.name, inst))
+
 
 if __name__ == "__main__":
     conf = config()
-    try:
-        jiraUp = jiraUpdate(conf)
-    except Exception as inst:
-        debug( "Fail to init JIRA API: %s" % inst)
-        sys.exit(inst.args[0])
 
-    act = action(conf, jiraUp)
+    act = action(conf)
     args = parseArgs()
     act.runAction(args)
