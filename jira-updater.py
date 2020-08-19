@@ -77,6 +77,8 @@ def parseArgs():
             help="Ticket key of the sheet")
     editParser.add_argument( "-d", "--sheetDir",
             help="Directory where is store ticket sheets")
+    editParser.add_argument( "-n", "--no-update", action='store_true',
+            help="Do not update sheet with field in csv")
 
     return parser.parse_args()
 
@@ -254,7 +256,7 @@ class action():
         outFields = conf.mergeFields(csvIn.fieldnames)
         rowOut = self._initFields(rowIn, outFields)
 
-        sheet2Edit.init(rowOut)
+        sheet2Edit.initWrite(rowOut, update=(not args.no_update))
 
         # Open with editor
         editor = 'vim'
@@ -468,14 +470,17 @@ class sheetObj:
             return self._fileTemp.name
         return self._realName
 
-    def init(self, fields):
+    def initWrite(self, fields, update=True):
         try:
             self._fileTemp = tempfile.NamedTemporaryFile(mode='x',
                     prefix=self._key+'out', suffix=".md")
         except Exception as inst:
             debug("Unable to open a temp sheet for %s: %s" % (self._key, inst))
 
-        self.update(fields)
+        if update:
+            self.update(fields)
+        else:
+            self._copy()
 
     def update(self, fields):
         sheetData = self.parse()
@@ -567,6 +572,17 @@ class sheetObj:
 
         return sheetFile
 
+    def _copy(self):
+        try:
+            self._fileRead.seek(0)
+            self._fileTemp.write(self._fileRead.read())
+            self._fileTemp.flush()
+        except Exception as inst:
+            debug("Failed to copy content of %s in %s: %s"
+                    % (self._fileRead.name, self._fileTemp.name, inst))
+            return False
+        return True
+
     def _parseHeader(self, line):
         p = re.compile('^# ([A-Z]+-[0-9]+)[ ]*:[ ]*([^ ].*[^ ])[ ]* #$')
         key = ""
@@ -600,11 +616,12 @@ class sheetObj:
         return comment
 
     def _getValue(self, line, nextLine):
+        pStop = re.compile('^#{1,2}([^#]+|$)')
         val = ""
         if not nextLine.startswith('#'):
             line = nextLine
             for nextLine in self._fileRead:
-                if nextLine.startswith('#'):
+                if pStop.match(nextLine):
                     if line != '\n':
                         val += line
                     break
