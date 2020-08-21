@@ -1,14 +1,22 @@
 # LU-0000 : summary #
 
+## JiraURL ##
+https://jira.whamcloud.com/browse/LU-0000
+
+## Interest ##
+0
+
 ## Comment ##
-template comment
+<Template comment>
 
 ## Risk ##
-template risk
+<Template risk>
 
 ## Fix ##
-template fix
+<Template fix>
 
 ## Analysis ##
-template analysis
+<Template analysis>
 
+## calltrace ##
+<Call Trace>

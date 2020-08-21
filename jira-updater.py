@@ -27,8 +27,8 @@ class config():
             ]
     localFields = [
             "interest",
-            "trackState",
-            "jiraURL",
+            "trackstate",
+            "jiraurl",
             "comment",
             ]
     dateFields = [
@@ -129,7 +129,7 @@ class action():
         ret = True
         if args.action in self.funcs:
             func = self.funcs[args.action]
-            return func(self, args)
+            ret = func(self, args)
         else:
             debug("Action callback not found: %s" % args.action)
             ret = False
@@ -146,12 +146,6 @@ class action():
         outFields = conf.mergeFields(csvIn.fieldnames)
         csvOut = self._initCsvWriter(args.outFile, outFields)
         if csvOut == None:
-            return False
-
-        try:
-            csvOut.writeheader()
-        except Exception as inst:
-            debug("Fail to write csv header: %s" % inst)
             return False
 
         # stat var
@@ -200,15 +194,8 @@ class action():
 
         # Clean
         del csvIn, csvOut
-        self._files['in'].close()
-        self._files['out'].flush()
-
-        if not args.outFile:
-            shutil.copyfile(self._files['in'].name,
-                    self._files['in'].name + '.old')
-            shutil.copyfile(self._files['out'].name, self._files['in'].name)
-
-        self._files['out'].close()
+        if not self._save(args.outFile):
+            return False
 
         # Report
         debug("\nNumber of updated rows: %d/%d," % (len(updatedKeys), rowNbr-1))
@@ -216,9 +203,15 @@ class action():
         debug("Number of new rows: %d/%d," % (len(newKeys), rowNbr-1))
         debug(" " + self._jira.link(newKeys))
 
+        return True
+
     def edit(self, args):
         csvIn = self._initCsvReader(args.inFile)
         if csvIn == None:
+            return False
+
+        csvOut = self._initCsvWriter(None, csvIn.fieldnames)
+        if csvOut == None:
             return False
 
         key = args.key
@@ -240,35 +233,38 @@ class action():
                 debug("Failed to create %s: %s" % (sheetDir, inst))
                 return False
 
-        # Open temp sheet
-        sheet2Edit = sheetObj.open(key, sheetDir, template=True)
-        if sheet2Edit == None:
-            return False
-
+        rowNbr = 1
+        isFound = False
         for rowIn in csvIn:
-            if rowIn['key'] == key:
+            rowNbr += 1
+            if 'key' in rowIn and rowIn['key'] == key:
+                if not self._editSheet(rowIn['key'],
+                        sheetDir,
+                        rowIn,
+                        update=(not args.no_update)):
+                    return False
+                csvOut.writerow(rowIn)
+                isFound = True
                 break
 
-        if rowIn['key'] != key:
+            csvOut.writerow(rowIn)
+
+        if not isFound:
             debug("Ticket key \"%s\" not found in %s" % (key, args.inFile.name))
-            return False
+            debug("Try to add %s in database" % key)
 
-        outFields = conf.mergeFields(csvIn.fieldnames)
-        rowOut = self._initFields(rowIn, outFields)
+            outFields = conf.mergeFields(rowIn.keys())
+            newRow = self._initFields({'key': key}, outFields)
 
-        sheet2Edit.initWrite(rowOut, update=(not args.no_update))
+            if self._initJiraApi():
+                self._jira.update(newRow, True)
+            if not self._editSheet(newRow['key'], sheetDir, newRow,update=True):
+                return False
 
-        # Open with editor
-        editor = 'vim'
-        if 'EDITOR' in os.environ:
-            editor = os.environ['EDITOR']
+            csvOut.writerow({k:newRow[k] for k in csvIn.fieldnames})
 
-        ret = os.system(editor + " '" + sheet2Edit.name(temp=True) + "'")
-
-        if ret == 0:
-            sheet2Edit.save()
-
-        sheet2Edit.close()
+        del csvIn, csvOut
+        return self._save(None)
 
     def search(self, args):
         print("search")
@@ -290,14 +286,67 @@ class action():
         rowOut.update(rowIn)
         rowOut['key'] = rowOut['key'].strip()
 
-        if not rowOut['jiraURL']:
-            rowOut['jiraURL'] = conf.jiraURLRoot + '/' + rowOut['key']
-        if not rowOut['trackState']:
-            rowOut['trackState'] = 'New'
+        if not rowOut['jiraurl']:
+            rowOut['jiraurl'] = conf.jiraURLRoot + '/browse/' + rowOut['key']
+        if not rowOut['trackstate']:
+            rowOut['trackstate'] = 'New'
         if not rowOut['interest']:
             rowOut['interest'] = '0'
         
         return rowOut
+
+    def _editSheet(self, key, sheetDir, rowIn, update=True, editor=True):
+        ret = True
+
+        # Open temp sheet
+        sheet2Edit = sheetObj.open(key, sheetDir, template=True)
+        if sheet2Edit == None:
+            return ret
+
+        outFields = conf.mergeFields(rowIn.keys())
+        rowOut = self._initFields(rowIn, outFields)
+
+        ret = sheet2Edit.initWrite(rowOut, update=update)
+
+        # Open with editor
+        if editor:
+            ret = self._openWithEditor(sheet2Edit.name(temp=True))
+
+        isChange = False
+        if editor and ret:
+            # Ask for save
+            prompt = input('Save(Y/n), Abort(a)?:')
+            if not prompt or prompt.lower() == 'y':
+                ret = sheet2Edit.save()
+                isChange = ret
+            elif prompt.lower() == 'a':
+                debug("Abort edition")
+                ret = False
+
+        elif not editor:
+            ret = sheet2Edit.save()
+
+        if isChange:
+            # Re-parse sheet to update rowIn
+            dataSheet = sheet2Edit.parse()
+            dataSheet.pop('key')
+            dataSheet.pop('summary')
+            for i in rowIn:
+                if (i in dataSheet.keys()
+                        and dataSheet[i]
+                        and rowIn[i] != dataSheet[i]):
+                    debug("- Update columns \"%s\" from sheet" % i)
+                    rowIn[i] = dataSheet[i]
+
+        sheet2Edit.close()
+        return ret
+
+    def _openWithEditor(self, fileName):
+        editor = 'vim'
+        if 'EDITOR' in os.environ:
+            editor = os.environ['EDITOR']
+
+        return (0 == os.system(editor + " '" + fileName + "'"))
     
     def _checkKeyFormat(self, key):
         p = re.compile('^[ \t]*[A-Z]+-[0-9]+[ \t]*$')
@@ -306,7 +355,7 @@ class action():
     def _convertCvsDate(self, row):
         # Convert dates
         for i in self._conf.dateFields:
-            if row[i]:
+            if i in row and row[i]:
                 row[i] = dateCSV.fromCsv(row[i])
 
     def _initCsvWriter(self, filePath, fields):
@@ -320,6 +369,7 @@ class action():
 
             csvOut = csv.DictWriter(self._files['out'], fields,
                     quoting=csv.QUOTE_NONNUMERIC)
+            csvOut.writeheader()
         except Exception as inst:
             debug("Fail to create CSV output file: %s" % inst)
             return None
@@ -335,6 +385,30 @@ class action():
             return None
 
         return csvIn
+
+    def _save(self, outFile):
+        ret = True
+        if not outFile:
+            # user use a temp file
+            try:
+                self._files['in'].close()
+                self._files['out'].flush()
+                shutil.copyfile(self._files['in'].name,
+                        self._files['in'].name + '.old')
+                shutil.copyfile(self._files['out'].name, self._files['in'].name)
+                self._files['out'].close()
+            except Exception as inst:
+                debug("Failed to save %s: %s" % (self._files['in'].name, inst))
+                ret = False
+        return ret
+
+    def _clean(self):
+        for k, f in self._files.items():
+            if f != None:
+                f.close()
+
+    def __del__(self):
+        self._clean()
 
     funcs = {
             "update" : update,
@@ -371,7 +445,7 @@ class jiraUpdate():
                 issueArr.append(self._jiraApi.issue( cmd,
                     fields=fields));
 
-            elif (row['trackState'] in ['Follow', 'Updated']
+            elif (row['trackstate'] in ['Follow', 'Updated']
                     and isinstance(row['updated'], dateCSV)):
                 date = dateCSV(row['updated'].date + timedelta(0,60))
                 cmd = self._UpdatedJQL % (row['key'], date)
@@ -382,7 +456,7 @@ class jiraUpdate():
 
         if len(issueArr) > 0:
             self._updateDict(issueArr[0], row)
-            row['trackState'] = 'Updated'
+            row['trackstate'] = 'Updated'
             ret = True
 
         return ret
@@ -471,16 +545,20 @@ class sheetObj:
         return self._realName
 
     def initWrite(self, fields, update=True):
+        ret = True
         try:
             self._fileTemp = tempfile.NamedTemporaryFile(mode='x',
                     prefix=self._key+'out', suffix=".md")
         except Exception as inst:
             debug("Unable to open a temp sheet for %s: %s" % (self._key, inst))
+            ret = False
 
         if update:
-            self.update(fields)
+            ret = self.update(fields)
         else:
-            self._copy()
+            ret = self._copy()
+
+        return ret
 
     def update(self, fields):
         sheetData = self.parse()
@@ -489,11 +567,8 @@ class sheetObj:
             return False
 
         for i in sheetData:
-            if i in fields:
-                if not i in ['key','summary']:
-                    sheetData[i] = self._formatVal(fields[i])
-                else:
-                    sheetData[i] = fields[i].strip()
+            if i in fields and fields[i]:
+                    sheetData[i] = fields[i]
 
         return self._writeData2Sheet(sheetData)
 
@@ -535,7 +610,7 @@ class sheetObj:
                 field = self._parseField(line)
                 if field:
                     value, line, nextLine = self._getValue(line, nextLine)
-                    dataSheet[field.casefold()] = value
+                    dataSheet[field.lower()] = value
 
             line = nextLine
 
@@ -556,11 +631,14 @@ class sheetObj:
             self._fileTemp.close()
 
     def save(self):
+        ret = True
         debug("Saving %s" % self._realName)
         try:
             shutil.copyfile(self._fileTemp.name, self._realName)
         except Exception as inst:
             debug("Failed to replace/create %s: %s" % (self._realName, inst))
+            ret = False
+        return ret
 
     def openTemplate():
         templatePath = os.path.dirname(__file__) + "/sheet.template"
@@ -620,23 +698,27 @@ class sheetObj:
         val = ""
         if not nextLine.startswith('#'):
             line = nextLine
+            isStop = False
             for nextLine in self._fileRead:
                 if pStop.match(nextLine):
+                    isStop = True
                     if line != '\n':
                         val += line
                     break
                 val += line
                 line = nextLine
 
+            # Check if end of file
+            if not isStop and line != '\n':
+                val += line
+
+        if val and val[-1] == '\n':
+            val = val[:-1]
+
         return val, line, nextLine
 
-    def _formatVal(self, val):
-        val.replace('\r\n', ' ');
-        val.replace('\n', ' ');
-
-        return re.sub("(.{80})", "\\1\n", val, 0, re.DOTALL) + '\n'
-
     def _writeData2Sheet(self, data):
+        ret = True
         try:
             # Write header
             self._fileTemp.write("# %s : %s #\n\n"
@@ -648,13 +730,19 @@ class sheetObj:
                     self._fileTemp.write("#%s" % value)
                 else:
                     self._fileTemp.write("## %s ##\n" % key.capitalize())
-                    self._fileTemp.write(value+'\n')
+                    self._fileTemp.write(value+"\n\n")
 
             self._fileTemp.flush()
 
         except Exception as inst:
             debug("Unable to write at sheet %s (%s): %s"
                     % (self._key, self._fileTemp.name, inst))
+            ret = False
+
+        return ret
+
+    def __del__(self):
+        self.close();
 
 
 if __name__ == "__main__":
