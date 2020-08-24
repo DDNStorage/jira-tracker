@@ -60,21 +60,42 @@ def parseArgs():
             help="Do not check for new tickets")
     updateParse.add_argument( "-f", "--force", action='store_true',
             help="Force to update each row of CSV files")
+
     # Search
     searchParse = subParsers.add_parser('search',
             help="Search in database")
     searchParse.add_argument("searchCmd",
             help="Jira search string")
+
     # Mail
     mailParse = subParsers.add_parser('mail',
             help="Generate output for a mail")
-    mailParse.add_argument("outFile", type=argparse.FileType('w'),
-            help="Output file")
+    mailParse.add_argument( "-d", "--sheetDir",
+            help="Directory where is store ticket sheets")
+    mailParse.add_argument( "-o", "--outFile", type=argparse.FileType('w'),
+            help="Mail output file", default=sys.stdout)
+    mailParse.add_argument("keys", nargs='*',
+            help="Ticket key of the sheet")
+    ##   Filters
+    mailParse.add_argument( "-u", "--updated", action='store_true',
+            help="Edit all updated tickets")
+    mailParse.add_argument( "-c", "--new", action='store_true',
+            help="Edit all new tickets")
+    mailParse.add_argument( "-f", "--filter", action='append', default=list(),
+            help="Ticket filter. Format: <column>=<patern_val>")
+    mailParse.add_argument( "-a", "--filter-and", action='store_true',
+            help="Match reunion of filters. By default match union")
+
     # Edit sheet
     editParser = subParsers.add_parser('edit',
             help="Edit jira ticket sheet")
+    editParser.add_argument( "-d", "--sheetDir",
+            help="Directory where is store ticket sheets")
+    editParser.add_argument( "-n", "--no-update", action='store_true',
+            help="Do not update sheet with field in csv")
     editParser.add_argument("keys", nargs='*',
             help="Ticket key of the sheet")
+    ##   Filters
     editParser.add_argument( "-u", "--updated", action='store_true',
             help="Edit all updated tickets")
     editParser.add_argument( "-c", "--new", action='store_true',
@@ -83,10 +104,6 @@ def parseArgs():
             help="Ticket filter. Format: <column>=<patern_val>")
     editParser.add_argument( "-a", "--filter-and", action='store_true',
             help="Match reunion of filters. By default match union")
-    editParser.add_argument( "-d", "--sheetDir",
-            help="Directory where is store ticket sheets")
-    editParser.add_argument( "-n", "--no-update", action='store_true',
-            help="Do not update sheet with field in csv")
 
     return parser.parse_args()
 
@@ -284,7 +301,51 @@ class action():
         print("search")
 
     def mail(self, args):
-        print("mail")
+        csvIn = self._initCsvReader(args.inFile)
+        if csvIn == None or not 'key' in csvIn.fieldnames:
+            return False
+        self._files['out'] = args.outFile
+        fdOut = args.outFile
+
+        keys = set()
+        for key in args.keys:
+            if self._checkKeyFormat(key):
+                keys.add(key)
+            else:
+                debug("Invalid key id: %s" % key)
+
+        # Add keys matching filters
+        keys.update(self._searchKeysFromArg(args))
+
+        if len(keys) <= 0:
+            debug('No sheet to display')
+            return False
+
+        debug("Display sheets with keys: %s" % ', '.join(keys))
+
+        sheetDir = args.sheetDir
+        if not sheetDir:
+            sheetDir = os.path.dirname(args.inFile.name)
+            if not sheetDir:
+                sheetDir = '.'
+            sheetDir += '/sheets'
+
+        notFound = list()
+        for key in keys:
+            sheet = sheetObj.open(key, sheetDir, template=False)
+            if sheet is None:
+                notFound.append(key)
+            else:
+                fdOut.write("%s--  \n\n" % sheet)
+
+        if len(notFound) > 0:
+            debug("Warning: following sheet not found: %s" % ', '.join(notFound))
+
+        fdOut.flush()
+        if fdOut.name != "<stdout>":
+            self._openWithEditor(fdOut.name)
+
+        return True
 
     def _initJiraApi(self):
         if self._jira == None:
@@ -595,13 +656,12 @@ class sheetObj:
         try:
             sheetFile = open(realName, 'r')
             debug("Existing sheet found for %s" % keyId)
-        except Exception as inst:
+        except:
             debug("No existing file found for %s" % keyId)
             if template:
                 debug("Use template instead")
                 sheetFile = sheetObj.openTemplate()
             else:
-                debug("Error: %s" % inst)
                 return sheet
 
         if sheetFile != None:
@@ -694,6 +754,28 @@ class sheetObj:
                 dataSheet[field] = ""
 
         return dataSheet
+
+    def __str__(self):
+        data = self.parse()
+        sheetStr = ""
+
+        if data is None:
+            return sheetStr
+
+        # Header
+        sheetStr += "**[%s](%s)**: %s>  \n" % (
+                data.pop('key', ""),
+                data.pop('jiraurl', ""),
+                data.pop('summary', ""),
+                )
+        # Fields
+        for name, value in data.items():
+            sheetStr+= "**%s**: " % name.capitalize()
+            if len(value) > 80 or value.find('\n') != -1:
+                sheetStr += ' \n'
+            sheetStr += str(value) + '  \n'
+
+        return sheetStr
 
     def close(self):
         self._fileRead.close()
