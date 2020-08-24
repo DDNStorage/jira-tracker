@@ -73,8 +73,16 @@ def parseArgs():
     # Edit sheet
     editParser = subParsers.add_parser('edit',
             help="Edit jira ticket sheet")
-    editParser.add_argument("key",
+    editParser.add_argument("keys", nargs='*',
             help="Ticket key of the sheet")
+    editParser.add_argument( "-u", "--updated", action='store_true',
+            help="Edit all updated tickets")
+    editParser.add_argument( "-c", "--new", action='store_true',
+            help="Edit all new tickets")
+    editParser.add_argument( "-f", "--filter", action='append', default=list(),
+            help="Ticket filter. Format: <column>=<patern_val>")
+    editParser.add_argument( "-a", "--filter-and", action='store_true',
+            help="Match reunion of filters. By default match union")
     editParser.add_argument( "-d", "--sheetDir",
             help="Directory where is store ticket sheets")
     editParser.add_argument( "-n", "--no-update", action='store_true',
@@ -210,13 +218,24 @@ class action():
         if csvIn == None:
             return False
 
-        csvOut = self._initCsvWriter(None, csvIn.fieldnames)
-        if csvOut == None:
+        keys = set()
+        for key in args.keys:
+            if self._checkKeyFormat(key):
+                keys.add(key)
+            else:
+                debug("Invalid key id: %s" % key)
+
+        # Add keys matching filters
+        keys.update(self._searchKeysFromArg(args))
+
+        if len(keys) <= 0:
+            debug('No sheet to be edited')
             return False
 
-        key = args.key
-        if not self._checkKeyFormat(key):
-            debug("Invalid key id: %s" % key)
+        debug("Editing keys: %s" % ', '.join(keys))
+
+        csvOut = self._initCsvWriter(None, csvIn.fieldnames)
+        if csvOut == None:
             return False
 
         sheetDir = args.sheetDir
@@ -233,23 +252,18 @@ class action():
                 debug("Failed to create %s: %s" % (sheetDir, inst))
                 return False
 
-        rowNbr = 1
-        isFound = False
         for rowIn in csvIn:
-            rowNbr += 1
-            if 'key' in rowIn and rowIn['key'] == key:
+            if 'key' in rowIn and rowIn['key'] in keys:
+                keys.remove(rowIn['key'])
                 if not self._editSheet(rowIn['key'],
                         sheetDir,
                         rowIn,
                         update=(not args.no_update)):
                     return False
-                csvOut.writerow(rowIn)
-                isFound = True
-                break
 
             csvOut.writerow(rowIn)
 
-        if not isFound:
+        for key in keys:
             debug("Ticket key \"%s\" not found in %s" % (key, args.inFile.name))
             debug("Try to add %s in database" % key)
 
@@ -294,6 +308,50 @@ class action():
             rowOut['interest'] = '0'
         
         return rowOut
+
+    def _searchKeysFromArg(self, args):
+        keys = set()
+        searchDict = list()
+        isOr = True
+
+        if hasattr(args, 'filter_and'):
+            isOr = not args.filter_and
+        if hasattr(args, 'updated') and args.updated:
+            searchDict.append(('trackstate', 'Updated'))
+        if hasattr(args, 'new') and args.new:
+            searchDict.append(('trackstate', 'New'))
+
+        for fil in args.filter:
+            splitFil = fil.split('=', 1)
+            if len(splitFil) == 2:
+                searchDict.append(tuple(splitFil))
+        if len(searchDict) > 0:
+            keys.update(self._searchKeys(searchDict, isOr))
+
+        return keys
+
+    def _searchKeys(self, conditions, isOr=True):
+        foundKeys = set()
+        csvIn = self._resetCsvReader()
+
+        if not 'key' in csvIn.fieldnames:
+            return foundKeys
+
+        for row in csvIn:
+            isKeyMatch = False
+            for cond in conditions:
+                k, v = cond
+                isKeyMatch = (k in row and row[k] == v)
+                if isOr and isKeyMatch:
+                    break
+                elif not isOr and not isKeyMatch:
+                    break
+
+            if isKeyMatch:
+                foundKeys.add(row['key'].strip())
+
+        self._resetCsvReader()
+        return foundKeys
 
     def _editSheet(self, key, sheetDir, rowIn, update=True, editor=True):
         ret = True
@@ -379,6 +437,18 @@ class action():
     def _initCsvReader(self, fdIn):
         self._files['in'] = fdIn
         try:
+            fdIn.seek(0)
+            csvIn = csv.DictReader(fdIn)
+        except Exception as inst:
+            debug("Fail to open CSV input file: %s" % inst)
+            return None
+
+        return csvIn
+
+    def _resetCsvReader(self):
+        fdIn = self._files['in']
+        try:
+            fdIn.seek(0)
             csvIn = csv.DictReader(fdIn)
         except Exception as inst:
             debug("Fail to open CSV input file: %s" % inst)
