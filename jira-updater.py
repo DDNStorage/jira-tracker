@@ -457,6 +457,14 @@ class action():
                     debug("- Update columns \"%s\" from sheet" % i)
                     rowIn[i] = dataSheet[i]
 
+        if ret and 'trackstate' in rowIn:
+            props = {'u': 'Updated', 'f':'Follow', 'c': 'Close'}
+            prompt = input("Change trackstate \"%s\"?\n" % rowIn['trackstate']
+                    + ', '.join(["%s(%s)" % (props[k], k) for k in props])
+                    + ': ')
+            if prompt and prompt.lower() in props:
+                rowIn['trackstate'] = props[prompt]
+
         sheet2Edit.close()
         return ret
 
