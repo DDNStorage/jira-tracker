@@ -794,7 +794,9 @@ class sheetObj:
         ret = True
         debug("Saving %s" % self._realName)
         try:
+            self._fileRead.close()
             shutil.copyfile(self._fileTemp.name, self._realName)
+            self._fileRead = open(self._realName)
         except Exception as inst:
             debug("Failed to replace/create %s: %s" % (self._realName, inst))
             ret = False
