@@ -105,6 +105,23 @@ def parseArgs():
     editParser.add_argument( "-a", "--filter-and", action='store_true',
             help="Match reunion of filters. By default match union")
 
+    # Modify values
+    setParser = subParsers.add_parser('modify',
+            help="Modify entries in the CSV")
+    setParser.add_argument("-k", "--keys",
+            help="Ticket keys to select (separate with comma)")
+    setParser.add_argument("values", nargs='+',
+            help="Values to modify (ex: 'trackstate=New' 'comment=Test test')")
+    ##   Filters
+    setParser.add_argument( "-u", "--updated", action='store_true',
+            help="Edit all updated tickets")
+    setParser.add_argument( "-c", "--new", action='store_true',
+            help="Edit all new tickets")
+    setParser.add_argument( "-f", "--filter", action='append', default=list(),
+            help="Ticket filter. Format: <column>=<patern_val>")
+    setParser.add_argument( "-a", "--filter-and", action='store_true',
+            help="Match reunion of filters. By default match union")
+
     return parser.parse_args()
 
 class dateCSV():
@@ -347,6 +364,62 @@ class action():
 
         return True
 
+    def modify(self, args):
+        csvIn = self._initCsvReader(args.inFile)
+        if csvIn == None:
+            return False
+
+        keys = set()
+        if args.keys:
+            for key in args.keys.split(','):
+                if self._checkKeyFormat(key):
+                    keys.add(key.strip())
+                else:
+                    debug("Invalid key id: %s" % key)
+
+        # Add keys matching filters
+        keys.update(self._searchKeysFromArg(args))
+
+        if len(keys) <= 0:
+            debug('No ticket ID entries to modify')
+            return False
+
+        # Get value to modify
+        valuesDict = dict()
+        for value in args.values:
+            splitVal = value.split('=', 1)
+            if len(splitVal) != 2:
+                debug("Malformed value string '%s'" % value)
+            elif not splitVal[0] in csvIn.fieldnames:
+                debug("Unknown value key '%s'" % splitVal[0])
+            else:
+                valuesDict.update({splitVal[0]: splitVal[1]})
+
+        if len(valuesDict) <= 0:
+            debug("No value to modify")
+            return False
+
+        debug("Modifying keys: %s" % ', '.join(keys))
+
+        csvOut = self._initCsvWriter(None, csvIn.fieldnames)
+        if csvOut == None:
+            return False
+
+        for row in csvIn:
+            if row['key'] in keys:
+                keys.remove(row['key'])
+                row.update(valuesDict)
+            csvOut.writerow(row)
+
+        if len(keys) > 0:
+            debug("Unknown ticket IDs: %s" % ', '.join(keys))
+
+        del csvIn, csvOut
+        return self._save(None)
+
+    def show(self, args):
+        pass
+
     def _initJiraApi(self):
         if self._jira == None:
             try:
@@ -554,6 +627,8 @@ class action():
             "search" : search,
             "mail"   : mail,
             "edit"   : edit,
+            "modify" : modify,
+            "show"   : show,
             }
 
 class jiraUpdate():
