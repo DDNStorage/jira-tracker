@@ -77,11 +77,11 @@ def parseArgs():
     mailParse.add_argument("keys", nargs='*',
             help="Ticket key of the sheet")
     ##   Filters
-    mailParse.add_argument( "-u", "--updated", action='store_true',
-            help="Edit all updated tickets")
-    mailParse.add_argument( "-c", "--new", action='store_true',
-            help="Edit all new tickets")
-    mailParse.add_argument( "-f", "--filter", action='append', default=list(),
+    mailParse.add_argument("--updated", action='store_true',
+            help="Select all updated tickets")
+    mailParse.add_argument("--new", action='store_true',
+            help="Select all new tickets")
+    mailParse.add_argument("-f", "--filter", action='append', default=list(),
             help="Ticket filter. Format: <column>=<patern_val>")
     mailParse.add_argument( "-a", "--filter-and", action='store_true',
             help="Match reunion of filters. By default match union")
@@ -89,17 +89,17 @@ def parseArgs():
     # Edit sheet
     editParser = subParsers.add_parser('edit',
             help="Edit jira ticket sheet")
-    editParser.add_argument( "-d", "--sheetDir",
+    editParser.add_argument("-d", "--sheetDir",
             help="Directory where is store ticket sheets")
-    editParser.add_argument( "-n", "--no-update", action='store_true',
+    editParser.add_argument("-n", "--no-update", action='store_true',
             help="Do not update sheet with field in csv")
     editParser.add_argument("keys", nargs='*',
             help="Ticket key of the sheet")
     ##   Filters
-    editParser.add_argument( "-u", "--updated", action='store_true',
-            help="Edit all updated tickets")
-    editParser.add_argument( "-c", "--new", action='store_true',
-            help="Edit all new tickets")
+    editParser.add_argument("--updated", action='store_true',
+            help="Select all updated tickets")
+    editParser.add_argument( "--new", action='store_true',
+            help="Select all new tickets")
     editParser.add_argument( "-f", "--filter", action='append', default=list(),
             help="Ticket filter. Format: <column>=<patern_val>")
     editParser.add_argument( "-a", "--filter-and", action='store_true',
@@ -113,13 +113,38 @@ def parseArgs():
     setParser.add_argument("values", nargs='+',
             help="Values to modify (ex: 'trackstate=New' 'comment=Test test')")
     ##   Filters
-    setParser.add_argument( "-u", "--updated", action='store_true',
-            help="Edit all updated tickets")
-    setParser.add_argument( "-c", "--new", action='store_true',
-            help="Edit all new tickets")
+    setParser.add_argument("--updated", action='store_true',
+            help="Select all updated tickets")
+    setParser.add_argument("--new", action='store_true',
+            help="Select all new tickets")
     setParser.add_argument( "-f", "--filter", action='append', default=list(),
             help="Ticket filter. Format: <column>=<patern_val>")
     setParser.add_argument( "-a", "--filter-and", action='store_true',
+            help="Match reunion of filters. By default match union")
+
+    # Show
+    showParser = subParsers.add_parser('show',
+            help="Select, format and display database entries")
+    showParser.add_argument( "-l", "--link", action='store_true',
+            help="Display only the Jira link to see tikets online")
+    showParser.add_argument( "-i", "--ids", action='store_true',
+            help="Display only tickets IDs")
+    showParser.add_argument( "-c", "--cols",
+            help="Select colums to display (default all): -c comment,trackstate")
+    showParser.add_argument("--csv", action='store_true',
+            help="Display lines in csv format")
+    showParser.add_argument("keys", nargs='*',
+            help="Ticket key of the sheet")
+    ##   Filters
+    showParser.add_argument("--all", action='store_true',
+            help="Select all tickets")
+    showParser.add_argument("--updated", action='store_true',
+            help="Select all updated tickets")
+    showParser.add_argument("--new", action='store_true',
+            help="Select all new tickets")
+    showParser.add_argument( "-f", "--filter", action='append', default=list(),
+            help="Ticket filter. Format: <column>=<patern_val>")
+    showParser.add_argument( "-a", "--filter-and", action='store_true',
             help="Match reunion of filters. By default match union")
 
     return parser.parse_args()
@@ -202,7 +227,7 @@ class action():
             if 'key' not in rowIn or not self._checkKeyFormat(rowIn['key']):
                 debug("Invalid 'key' at %s:%d" % (args.inFile.name, rowNbr))
                 continue
-            
+
             self._convertCvsDate(rowIn)
             rowOut = self._initFields(rowIn, outFields)
 
@@ -241,9 +266,9 @@ class action():
 
         # Report
         debug("\nNumber of updated rows: %d/%d," % (len(updatedKeys), rowNbr-1))
-        debug(" " + self._jira.link(updatedKeys))
+        debug(" " + jiraUpdate.link(self._conf.jiraURLRoot, updatedKeys))
         debug("Number of new rows: %d/%d," % (len(newKeys), rowNbr-1))
-        debug(" " + self._jira.link(newKeys))
+        debug(" " + jiraUpdate.link(self._conf.jiraURLRoot, newKeys))
 
         return True
 
@@ -418,7 +443,77 @@ class action():
         return self._save(None)
 
     def show(self, args):
-        pass
+        csvIn = self._initCsvReader(args.inFile)
+        if csvIn == None or not 'key' in csvIn.fieldnames:
+            return False
+
+        keys = set()
+        for key in args.keys:
+            if self._checkKeyFormat(key):
+                keys.add(key)
+            else:
+                debug("Invalid key id: %s" % key)
+
+        # Add keys matching filters
+        keys.update(self._searchKeysFromArg(args))
+
+        if args.link:
+            ret = True
+            if len(keys) > 0:
+                print(jiraUpdate.link(self._conf.jiraURLRoot, list(keys)))
+                return True
+            debug("No keys selected, use filter or keys for selection")
+            return False
+
+        cols = list(csvIn.fieldnames)
+        cols.remove('key')
+        if args.cols is not None:
+            cols = args.cols.split(',')
+            cols = [i.strip().lower() for i in cols]
+
+        writer = sys.stdout
+        showFct = action._showUser
+        if args.ids:
+            showFct = action._showId
+        elif args.csv:
+            writer = self._initCsvWriter(writer, ['key'] + cols)
+            showFct = action._showCsv
+
+        for row in csvIn:
+            if row['key'] in keys or args.all:
+                key = row['key']
+                if len(keys) > 0:
+                    keys.remove(key)
+                showFct(row, cols, writer)
+
+        if args.ids:
+            writer.write('\n')
+
+        if len(keys) > 0:
+            debug("Unknown ticket IDs: %s" % ', '.join(keys))
+
+        return True
+
+    def _showId(row, cols, writer):
+        key = row.setdefault('key', "NA")
+        return writer.write("%s " % key)
+
+    def _showCsv(row, cols, writer):
+        return writer.writerow({k:row.setdefault(k, "NA") for k in ['key'] + cols})
+
+    def _showUser(row, cols, writer):
+        key = row.setdefault('key', "NA")
+
+        writer.write("%s :\n" % key)
+        for k in cols:
+            writer.write("\t%s : " % k.capitalize())
+
+            field = row.setdefault(k, "NA")
+            if len(field) > 80 or field.find("\n") >= 0:
+                writer.write("\n\t  ")
+            writer.write("%s\n" % field.replace("\n", "\n\t  "))
+
+        writer.write("--\n")
 
     def _initJiraApi(self):
         if self._jira == None:
@@ -440,7 +535,7 @@ class action():
             rowOut['trackstate'] = 'New'
         if not rowOut['interest']:
             rowOut['interest'] = '0'
-        
+
         return rowOut
 
     def _searchKeysFromArg(self, args):
@@ -547,7 +642,7 @@ class action():
             editor = os.environ['EDITOR']
 
         return (0 == os.system(editor + " '" + fileName + "'"))
-    
+
     def _checkKeyFormat(self, key):
         p = re.compile('^[ \t]*[A-Z]+-[0-9]+[ \t]*$')
         return p.match(key)
@@ -558,14 +653,16 @@ class action():
             if i in row and row[i]:
                 row[i] = dateCSV.fromCsv(row[i])
 
-    def _initCsvWriter(self, filePath, fields):
+    def _initCsvWriter(self, file, fields):
         try:
-            if not filePath:
+            if not file:
                 updateOutPrefix = os.path.basename(__file__) + '.out.'
                 self._files['out'] = tempfile.NamedTemporaryFile(mode='x',
                         prefix=updateOutPrefix, suffix=".csv")
+            elif hasattr(file, 'write'):
+                self._files['out'] = file
             else:
-                self._files['out'] = open(filePath, 'w')
+                self._files['out'] = open(file, 'w')
 
             csvOut = csv.DictWriter(self._files['out'], fields,
                     quoting=csv.QUOTE_NONNUMERIC)
@@ -698,17 +795,17 @@ class jiraUpdate():
 
         return retArr
 
-    def link(self, issueIds):
+    def link(urlRoot, issueIds):
         link = ''
         if len(issueIds) > 0:
             params = {
                     'maxResults' : 50000,
                     'jql' : 'key in (%s)' % ','.join(issueIds)
                     }
-            link = (self._conf.jiraURLRoot
+            link = (urlRoot
                     + '/browse/%s?' % issueIds[0]
                     + urllib.parse.urlencode(params))
-        
+
         return link
 
     def _updateDict(self, jiraObj, dict2Up):
@@ -846,7 +943,7 @@ class sheetObj:
             return sheetStr
 
         # Header
-        sheetStr += "**[%s](%s)**: %s>  \n" % (
+        sheetStr += "**[%s](%s)**: %s  \n" % (
                 data.pop('key', ""),
                 data.pop('jiraurl', ""),
                 data.pop('summary', ""),
