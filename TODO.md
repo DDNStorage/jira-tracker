@@ -1,0 +1,6 @@
+# TODO #
+
+1. Clean the code: split the code into several files, add some comments...
+2. Create a config file to specified editor, Jira website, CSV files etc...
+3. Improve performance for update command
+4. Implement a search function (to mix jira data with sheet and CSV data)
