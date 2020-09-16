@@ -1034,10 +1034,8 @@ class sheetObj:
             line = nextLine
             isStop = False
             for nextLine in self._fileRead:
-                if pStop.match(nextLine):
+                if pStop.match(nextLine) and line == '\n':
                     isStop = True
-                    if line != '\n':
-                        val += line
                     break
                 val += line
                 line = nextLine
